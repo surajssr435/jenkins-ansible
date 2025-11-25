@@ -1,0 +1,56 @@
+---
+- name: System Resource Monitoring
+  hosts: all
+  gather_facts: yes
+  become: yes
+
+  vars:
+    process_list:
+      - sshd
+      - nginx
+  tasks:
+
+    # CPU USAGE
+    - name: Check CPU usage
+    shell: "top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'"
+    register: cpu_usage
+
+    - debug:
+        msg: "CPU Usage: {{ cpu_usage.stdout }}%"
+
+    # MEMORY USAGE
+    - name: Check Memory usage
+      shell: "free -m | awk 'NR==2{printf(\"%s/%sMB (%.2f%%)\", $3,$2,$3*100/$2 )}'"
+      register: memory_usage
+
+    - debug:
+        msg: "Memory Usage: {{ memory_usage.stdout }}"
+
+    # DISK USAGE
+    - name: Check Disk usage
+      shell: "df -h --total | grep total | awk '{print $3\"/\"$2\" (\"$5\")\"}'"
+      register: disk_usage
+
+    - debug:
+        msg: "Disk Usage: {{ disk_usage.stdout }}"
+
+    # LOAD AVERAGE
+    - name: Get Load Average
+      shell: "uptime | awk -F'load average:' '{ print $2 }'"
+      register: load_avg
+
+    - debug:
+        msg: "Load average: {{ load_avg.stdout }}"
+
+    # PROCESS CHECK
+    - name: Check important processes
+      shell: "pgrep -fl {{ item }}"
+      register: proc_status
+      ignore_errors: yes
+      loop: "{{ process_list }}"
+      tags: process_check
+
+    - debug:
+        msg: "Process {{ item.item }} status: {{ item.stdout | default('Not running') }}"
+      loop: "{{ proc_status.results }}"
+
