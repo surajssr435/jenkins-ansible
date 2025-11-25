@@ -1,245 +1,132 @@
 ---
-- name: System Resource Monitoring with HTML Email Alerts (mutt)
+- name: System Resource Monitoring with HTML Alerts
   hosts: all
   gather_facts: yes
   become: yes
 
   vars:
-    threshold: 80                        # percent threshold to trigger alert
-    alert_email: "suraj.shinde@signzy.com"
-    alert_subject: "ALERT: Resource Utilization High on {{ inventory_hostname }}"
-    # processes to check (present / absent)
-    check_processes:
+    threshold: 80
+    process_list:
       - sshd
       - nginx
-      - docker
-      - mysqld
-    tmp_dir: "/tmp"
-    html_file: "{{ tmp_dir }}/ansible_alert_{{ inventory_hostname }}.html"
+    alert_file: /tmp/system_alert.html
 
   tasks:
 
-    - name: Ensure mutt is installed (Debian/Ubuntu)
-      apt:
-        name: mutt
-        state: present
-        update_cache: yes
-      when: ansible_facts['os_family'] == "Debian"
-
-    - name: Ensure mutt is installed (RedHat/CentOS)
-      yum:
-        name: mutt
-        state: present
-      when: ansible_facts['os_family'] == "RedHat"
-
-    # --- METRICS COLLECTION ---
-
-    - name: Get CPU usage percent (1-snapshot)
-      shell: "top -bn1 | awk '/Cpu\\(s\\)/{print 100 - $8}'"
+    # -----------------------------------------------------------
+    # CPU USAGE
+    # -----------------------------------------------------------
+    - name: Get CPU usage
+      shell: "top -bn1 | grep 'Cpu(s)' | awk '{print 100 - $8}'"
       register: cpu_usage_raw
-      changed_when: false
 
-    - name: Parse CPU usage as float
-      set_fact:
-        cpu_usage_pct: "{{ (cpu_usage_raw.stdout | default('0') | float) | round(2) }}"
+    - set_fact:
+        cpu_usage: "{{ cpu_usage_raw.stdout | float | round(2) }}"
 
-    - name: Get Memory usage percent (integer)
-      shell: "free | awk '/Mem/ {printf(\"%d\", $3/$2 * 100)}'"
+    # -----------------------------------------------------------
+    # MEMORY USAGE
+    # -----------------------------------------------------------
+    - name: Get Memory usage
+      shell: "free -m | awk 'NR==2{printf(\"%.2f\", $3*100/$2)}'"
       register: mem_usage_raw
-      changed_when: false
 
-    - name: Parse Memory usage as int and human used/total
-      shell: "free -m | awk 'NR==2{printf(\"%s/%sMB (%.0f%%)\",$3,$2,$3*100/$2)}'"
-      register: mem_usage_human
-      changed_when: false
+    - set_fact:
+        mem_usage: "{{ mem_usage_raw.stdout | float | round(2) }}"
 
-    - name: Set memory facts
-      set_fact:
-        mem_usage_pct: "{{ (mem_usage_raw.stdout | default('0') | int) }}"
-        mem_usage_human: "{{ mem_usage_human.stdout | default('N/A') }}"
-
-    - name: Get Disk usage percent for root (/)
-      shell: "df -P / | awk 'NR==2{gsub(\"%\",\"\"); print $5}'"
+    # -----------------------------------------------------------
+    # DISK USAGE
+    # -----------------------------------------------------------
+    - name: Get Disk usage (root)
+      shell: "df / | awk 'NR==2{print $5}' | sed 's/%//'"
       register: disk_usage_raw
-      changed_when: false
 
-    - name: Get Disk usage human readable for root (/)
-      shell: "df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'"
-      register: disk_usage_human
-      changed_when: false
+    - set_fact:
+        disk_usage: "{{ disk_usage_raw.stdout | float | round(2) }}"
 
-    - name: Set disk facts
+    # -----------------------------------------------------------
+    # LOAD AVERAGE
+    # -----------------------------------------------------------
+    - name: Get vCPU count
       set_fact:
-        disk_usage_pct: "{{ (disk_usage_raw.stdout | default('0') | int) }}"
-        disk_usage_human: "{{ disk_usage_human.stdout | default('N/A') }}"
+        vcpu_count: "{{ ansible_processor_vcpus | default(2) }}"
 
-    - name: Get 1-minute load average
-      shell: "awk '{print $1}' /proc/loadavg"
+    - name: Get load average (1 min)
+      shell: "awk '{print $(NF-2)}' /proc/loadavg"
       register: load_avg_raw
-      changed_when: false
 
-    - name: Ensure vCPU count fact available
+    - set_fact:
+        load_1min: "{{ load_avg_raw.stdout | float }}"
+        load_pct_of_vcpu: "{{ ((load_avg_raw.stdout | float) * 100 / vcpu_count) | round(2) }}"
+
+    # -----------------------------------------------------------
+    # PROCESS CHECKS
+    # -----------------------------------------------------------
+    - name: Check required processes
+      shell: "pgrep -fl {{ item }}"
+      register: proc_status
+      ignore_errors: yes
+      loop: "{{ process_list }}"
+
+    - name: Format process results
       set_fact:
-        vcpu_count: >-
-          {{
-            (ansible_facts.processor_vcpus | default(
-               ansible_facts['processor_count'] | default(1)
-            )) | int
-          }}
+        proc_results: |
+          {% for p in proc_status.results %}
+            <tr>
+              <td>{{ p.item }}</td>
+              <td>{{ 'Running' if p.stdout != '' else 'Not Running' }}</td>
+            </tr>
+          {% endfor %}
 
-    - name: Parse load numeric and load percent of vCPU
-      set_fact:
-        load_1min: "{{ (load_avg_raw.stdout | default('0') | float) }}"
-        load_pct_of_vcpu: "{{ ((load_1min | float) * 100.0 / (vcpu_count | int)) | round(2) }}"
-
-    # --- PROCESS CHECKS ---
-
-    - name: Check processes (pgrep) and collect statuses
-      shell: "pgrep -fl {{ item }} || true"
-      register: proc_results
-      loop: "{{ check_processes }}"
-      changed_when: false
-
-    - name: Build process status list
-      set_fact:
-        process_statuses: >-
-          {{
-            (proc_results.results | map(attribute='stdout') | zip(check_processes) |
-            map('combine', {}) | list) | map('join','') | list
-          }}
-      # fallback easier approach:
-      when: proc_results is defined
-      # Above complex combine is fragile; we'll instead create a simpler dict below
-
-    - name: Create a usable process status dict
-      set_fact:
-        proc_status_dict: >-
-          {{
-            dict(
-              proc_results.results | map(attribute='item') | list,
-              proc_results.results | map(attribute='stdout') | list
-            )
-          }}
-
-    # --- ALERT DECISION: Any metric over threshold? ---
-
-    - name: Determine if threshold breached
-      set_fact:
-        threshold_breached: >-
-          {{
-            (cpu_usage_pct | float) > (threshold | float)
-            or (mem_usage_pct | float) > (threshold | float)
-            or (disk_usage_pct | float) > (threshold | float)
-            or (load_pct_of_vcpu | float) > (threshold | float)
-          }}
-
-    - name: Build HTML alert body (only when breached)
+    # -----------------------------------------------------------
+    # BUILD HTML ALERT
+    # -----------------------------------------------------------
+    - name: Build HTML alert file
       copy:
-        dest: "{{ html_file }}"
+        dest: "{{ alert_file }}"
         content: |
-          <!doctype html>
           <html>
-          <head>
-            <meta charset="utf-8"/>
-            <style>
-              body { font-family: Arial, Helvetica, sans-serif; font-size: 14px; }
-              table { border-collapse: collapse; width: 600px; }
-              th, td { border: 1px solid #dddddd; text-align: left; padding: 8px; }
-              th { background-color: #f2f2f2; }
-              .ok { color: #2d862d; font-weight: bold; }
-              .warn { color: #b56b00; font-weight: bold; }
-              .crit { color: #b30000; font-weight: bold; }
-            </style>
-          </head>
-          <body>
-            <h2>Resource Alert for {{ inventory_hostname }}</h2>
-            <p>Threshold: <strong>{{ threshold }}%</strong></p>
+          <body style="font-family: Arial;">
 
-            <table>
-              <tr><th>Metric</th><th>Value</th><th>Status</th></tr>
-              <tr>
-                <td>CPU Usage</td>
-                <td>{{ cpu_usage_pct }}%</td>
-                <td>
-                  {% if cpu_usage_pct | float > threshold | float %}
-                    <span class="crit">ALERT</span>
-                  {% else %}
-                    <span class="ok">OK</span>
-                  {% endif %}
-                </td>
-              </tr>
-              <tr>
-                <td>Memory Usage</td>
-                <td>{{ mem_usage_human }}</td>
-                <td>
-                  {% if mem_usage_pct | float > threshold | float %}
-                    <span class="crit">ALERT</span>
-                  {% else %}
-                    <span class="ok">OK</span>
-                  {% endif %}
-                </td>
-              </tr>
-              <tr>
-                <td>Disk Usage ( / )</td>
-                <td>{{ disk_usage_human }}</td>
-                <td>
-                  {% if disk_usage_pct | float > threshold | float %}
-                    <span class="crit">ALERT</span>
-                  {% else %}
-                    <span class="ok">OK</span>
-                  {% endif %}
-                </td>
-              </tr>
-              <tr>
-                <td>Load (1min)</td>
-                <td>{{ load_1min }} ({{ load_pct_of_vcpu }}% of vCPU)</td>
-                <td>
-                  {% if load_pct_of_vcpu | float > threshold | float %}
-                    <span class="warn">ALERT</span>
-                  {% else %}
-                    <span class="ok">OK</span>
-                  {% endif %}
-                </td>
-              </tr>
-            </table>
+          <h2>🚨 System Resource Alert for {{ inventory_hostname }}</h2>
 
-            <h3>Process Status</h3>
-            <table>
-              <tr><th>Process</th><th>Details</th><th>State</th></tr>
-              {% for pname, pstdout in proc_status_dict.items() %}
-                <tr>
-                  <td>{{ pname }}</td>
-                  <td><pre style="white-space:pre-wrap; margin:0;">{{ pstdout | default('Not running') }}</pre></td>
-                  <td>{% if pstdout | length > 0 %}<span class="ok">Running</span>{% else %}<span class="crit">Not running</span>{% endif %}</td>
-                </tr>
-              {% endfor %}
-            </table>
+          <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
 
-            <p>Collected at: {{ ansible_date_time.iso8601 }}</p>
+            <tr><th>Metric</th><th>Value</th></tr>
+
+            <tr><td>CPU Usage</td><td>{{ cpu_usage }}%</td></tr>
+            <tr><td>Memory Usage</td><td>{{ mem_usage }}%</td></tr>
+            <tr><td>Disk Usage</td><td>{{ disk_usage }}%</td></tr>
+            <tr><td>Load Average (1min)</td><td>{{ load_1min }}</td></tr>
+            <tr><td>Load % of vCPU</td><td>{{ load_pct_of_vcpu }}%</td></tr>
+
+          </table>
+
+          <br><br>
+          <h3>Process Status</h3>
+
+          <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+            <tr><th>Process</th><th>Status</th></tr>
+            {{ proc_results }}
+          </table>
+
+          <br><br>
+          <p>Alert Threshold: {{ threshold }}%</p>
+
           </body>
           </html>
-      when: threshold_breached
 
-    - name: Send HTML alert email with mutt (only when breached)
-      shell: |
-        # send HTML file via mutt (mutt must be configured on the host)
-        /bin/bash -lc "mutt -e 'set content_type=text/html' -s '{{ alert_subject }}' -- '{{ alert_email }}' < '{{ html_file }}'"
-      args:
-        warn: false
-      when: threshold_breached
-
-    - name: Remove temporary HTML file
-      file:
-        path: "{{ html_file }}"
-        state: absent
-      when: threshold_breached
-
-    - name: Show metrics (always)
-      debug:
-        msg:
-          - "CPU: {{ cpu_usage_pct }}%"
-          - "MEM: {{ mem_usage_pct }}% ({{ mem_usage_human }})"
-          - "DISK: {{ disk_usage_pct }}% ({{ disk_usage_human }})"
-          - "LOAD(1m): {{ load_1min }} ({{ load_pct_of_vcpu }}% of vCPU)"
-          - "vCPU count: {{ vcpu_count }}"
-          - "Threshold breached: {{ threshold_breached }}"
+    # -----------------------------------------------------------
+    # CONDITIONAL EMAIL ALERT
+    # -----------------------------------------------------------
+    - name: Send alert email via mutt
+      shell: >
+        mutt -e "set content_type=text/html"  
+        -s "🚨 ALERT: High Resource Usage on {{ inventory_hostname }}"  
+        -- {{ email_to }} < {{ alert_file }}
+      vars:
+        email_to: "suraj.shinde@signzy.com"
+      when: >
+        (cpu_usage > threshold) or
+        (mem_usage > threshold) or
+        (disk_usage > threshold) or
+        (load_pct_of_vcpu > threshold)
