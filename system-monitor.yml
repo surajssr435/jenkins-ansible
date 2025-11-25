@@ -8,12 +8,13 @@
     process_list:
       - sshd
       - nginx
+
   tasks:
 
     # CPU USAGE
     - name: Check CPU usage
-    shell: "top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'"
-    register: cpu_usage
+      shell: "top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'"
+      register: cpu_usage
 
     - debug:
         msg: "CPU Usage: {{ cpu_usage.stdout }}%"
@@ -53,4 +54,3 @@
     - debug:
         msg: "Process {{ item.item }} status: {{ item.stdout | default('Not running') }}"
       loop: "{{ proc_status.results }}"
-
