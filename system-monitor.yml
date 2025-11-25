@@ -5,35 +5,34 @@
   become: yes
 
   vars:
-    threshold: 50
-    alert_email: "surajshinde59.ss@gmail.com"
-    sender_email: "suraj.shinde@signzy.com"
+    threshold: 80
+    alert_email: "suraj.shinde@signzy.com"
+    sender_email: "surajshinde59.ss@gmail.com"
     smtp_server: "smtp.example.com"
     smtp_port: 587
 
   tasks:
 
-    # CPU
     - name: Check CPU Usage
-      shell: "top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'"
+      shell: "top -bn1 | awk '/Cpu/ {print 100 - $8}'"
       register: cpu_usage
 
-    # Memory
     - name: Check Memory Usage
       shell: "free | awk '/Mem/ {printf(\"%.0f\", $3/$2 * 100)}'"
       register: mem_usage
 
-    # Disk
-    - name: Check disk usage
+    - name: Check Disk Usage
       shell: "df -h / | awk 'NR==2 {gsub(\"%\",\"\"); print $5}'"
       register: disk_usage
 
-    # Load Average (1 min load)
-    - name: Check load average
+    - name: Check Load Average
       shell: "awk '{print $1}' /proc/loadavg"
       register: load_avg
 
-    # Prepare alert message
+    - name: Set vCPU count
+      set_fact:
+        vcpu_count: "{{ ansible_facts.processor_vcpus | default(1) }}"
+
     - name: Build alert body
       set_fact:
         alert_message: |
@@ -45,14 +44,12 @@
           Load Average (1min): {{ load_avg.stdout }}
 
           Threshold: {{ threshold }}%
-
       when: >
-        cpu_usage.stdout | int > threshold or
-        mem_usage.stdout | int > threshold or
-        disk_usage.stdout | int > threshold or
-        (load_avg.stdout | float * 100 / ansible_facts['ansible_processor_count']) > threshold
+        (cpu_usage.stdout | int) > threshold or
+        (mem_usage.stdout | int) > threshold or
+        (disk_usage.stdout | int) > threshold or
+        ((load_avg.stdout | float * 100 / vcpu_count) > threshold)
 
-    # Send Email if threshold is breached
     - name: Send alert email
       mail:
         host: "{{ smtp_server }}"
@@ -63,11 +60,11 @@
         body: "{{ alert_message }}"
       when: alert_message is defined
 
-    # Debug output
-    - name: Print metrics
+    - name: Print Metrics
       debug:
         msg:
           - "CPU: {{ cpu_usage.stdout }}%"
           - "MEM: {{ mem_usage.stdout }}%"
           - "DISK: {{ disk_usage.stdout }}%"
           - "LOAD: {{ load_avg.stdout }}"
+          - "vCPU count: {{ vcpu_count }}"
