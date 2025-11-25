@@ -5,7 +5,7 @@
   become: yes
 
   vars:
-    threshold: 80
+    threshold: 50
     alert_email: "suraj.shinde@signzy.com"
     sender_email: "surajshinde59.ss@gmail.com"
     smtp_server: "smtp.example.com"
