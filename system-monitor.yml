@@ -72,7 +72,7 @@
 
     # Memory usage
     - name: Get Memory usage
-      shell: "free -m | awk 'NR==2{printf("%.2f", ($2-$7)*100/$2)}'"
+      shell: "free -m | awk 'NR==2{printf(\"%.2f\", $3*100/$2)}'"
       register: mem_usage_raw
 
     - set_fact:
