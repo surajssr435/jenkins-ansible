@@ -1,56 +1,73 @@
 ---
-- name: System Resource Monitoring
+- name: Monitor System Resources With Alert
   hosts: all
   gather_facts: yes
   become: yes
 
   vars:
-    process_list:
-      - sshd
-      - nginx
+    threshold: 50
+    alert_email: "surajshinde59.ss@gmail.com"
+    sender_email: "suraj.shinde@signzy.com"
+    smtp_server: "smtp.example.com"
+    smtp_port: 587
 
   tasks:
 
-    # CPU USAGE
-    - name: Check CPU usage
+    # CPU
+    - name: Check CPU Usage
       shell: "top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'"
       register: cpu_usage
 
-    - debug:
-        msg: "CPU Usage: {{ cpu_usage.stdout }}%"
+    # Memory
+    - name: Check Memory Usage
+      shell: "free | awk '/Mem/ {printf(\"%.0f\", $3/$2 * 100)}'"
+      register: mem_usage
 
-    # MEMORY USAGE
-    - name: Check Memory usage
-      shell: "free -m | awk 'NR==2{printf(\"%s/%sMB (%.2f%%)\", $3,$2,$3*100/$2 )}'"
-      register: memory_usage
-
-    - debug:
-        msg: "Memory Usage: {{ memory_usage.stdout }}"
-
-    # DISK USAGE
-    - name: Check Disk usage
-      shell: "df -h --total | grep total | awk '{print $3\"/\"$2\" (\"$5\")\"}'"
+    # Disk
+    - name: Check disk usage
+      shell: "df -h / | awk 'NR==2 {gsub(\"%\",\"\"); print $5}'"
       register: disk_usage
 
-    - debug:
-        msg: "Disk Usage: {{ disk_usage.stdout }}"
-
-    # LOAD AVERAGE
-    - name: Get Load Average
-      shell: "uptime | awk -F'load average:' '{ print $2 }'"
+    # Load Average (1 min load)
+    - name: Check load average
+      shell: "awk '{print $1}' /proc/loadavg"
       register: load_avg
 
-    - debug:
-        msg: "Load average: {{ load_avg.stdout }}"
+    # Prepare alert message
+    - name: Build alert body
+      set_fact:
+        alert_message: |
+          Resource Alert for {{ inventory_hostname }}
 
-    # PROCESS CHECK
-    - name: Check important processes
-      shell: "pgrep -fl {{ item }}"
-      register: proc_status
-      ignore_errors: yes
-      loop: "{{ process_list }}"
-      tags: process_check
+          CPU Usage: {{ cpu_usage.stdout }}%
+          Memory Usage: {{ mem_usage.stdout }}%
+          Disk Usage: {{ disk_usage.stdout }}%
+          Load Average (1min): {{ load_avg.stdout }}
 
-    - debug:
-        msg: "Process {{ item.item }} status: {{ item.stdout | default('Not running') }}"
-      loop: "{{ proc_status.results }}"
+          Threshold: {{ threshold }}%
+
+      when: >
+        cpu_usage.stdout | int > threshold or
+        mem_usage.stdout | int > threshold or
+        disk_usage.stdout | int > threshold or
+        (load_avg.stdout | float * 100 / ansible_facts['ansible_processor_count']) > threshold
+
+    # Send Email if threshold is breached
+    - name: Send alert email
+      mail:
+        host: "{{ smtp_server }}"
+        port: "{{ smtp_port }}"
+        to: "{{ alert_email }}"
+        from: "{{ sender_email }}"
+        subject: "ALERT: Resource Threshold Exceeded on {{ inventory_hostname }}"
+        body: "{{ alert_message }}"
+      when: alert_message is defined
+
+    # Debug output
+    - name: Print metrics
+      debug:
+        msg:
+          - "CPU: {{ cpu_usage.stdout }}%"
+          - "MEM: {{ mem_usage.stdout }}%"
+          - "DISK: {{ disk_usage.stdout }}%"
+          - "LOAD: {{ load_avg.stdout }}"
