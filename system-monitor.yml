@@ -1,21 +1,68 @@
 ---
-- name: System Resource Monitoring with HTML Alerts
+- name: Full System Monitoring with HTML Email Alerts
   hosts: all
   gather_facts: yes
   become: yes
 
   vars:
     threshold: 80
+    email_to: "suraj.shinde@signzy.com"
     process_list:
       - sshd
       - nginx
+      - docker
     alert_file: /tmp/system_alert.html
 
   tasks:
+    # -----------------------------------------------------------
+    # Step 1: Install mutt and dependencies
+    # -----------------------------------------------------------
+    - name: Install mutt mail client
+      apt:
+        name: mutt
+        state: present
+        update_cache: yes
+
+    - name: Ensure .mutt directory exists
+      file:
+        path: "/home/{{ ansible_user }}/.mutt"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0700
+
+    - name: Configure mutt
+      copy:
+        dest: "/home/{{ ansible_user }}/.mutt/muttrc"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0600
+        content: |
+          set realname = "Suraj Shinde"
+          set from = "suraj.shinde@signzy.com"
+          set use_from = yes
+          set envelope_from = yes
+
+          # IMAP
+          set imap_user = "suraj.shinde@signzy.com"
+          set imap_pass = "aedz ihoe uubz ibqr"
+          set folder = "imaps://imap.gmail.com:993"
+          set spoolfile = "+INBOX"
+
+          # SMTP
+          set smtp_url = "smtp://suraj.shinde@signzy.com@smtp.gmail.com:587/"
+          set smtp_pass = "aedz ihoe uubz ibqr"
+
+          set ssl_force_tls = yes
+          set ssl_starttls = yes
+          set editor = "nano"
+          set copy = no
 
     # -----------------------------------------------------------
-    # CPU USAGE
+    # Step 2: System Metrics
     # -----------------------------------------------------------
+
+    # CPU usage
     - name: Get CPU usage
       shell: "top -bn1 | grep 'Cpu(s)' | awk '{print 100 - $8}'"
       register: cpu_usage_raw
@@ -23,34 +70,29 @@
     - set_fact:
         cpu_usage: "{{ cpu_usage_raw.stdout | float | round(2) }}"
 
-    # -----------------------------------------------------------
-    # MEMORY USAGE
-    # -----------------------------------------------------------
+    # Memory usage
     - name: Get Memory usage
-      shell: "free -m | awk 'NR==2{printf(\"%.2f\", $3*100/$2)}'"
+      shell: "free -m | awk 'NR==2{printf("%.2f", ($2-$7)*100/$2)}'"
       register: mem_usage_raw
 
     - set_fact:
         mem_usage: "{{ mem_usage_raw.stdout | float | round(2) }}"
 
-    # -----------------------------------------------------------
-    # DISK USAGE
-    # -----------------------------------------------------------
-    - name: Get Disk usage (root)
+    # Disk usage
+    - name: Get Disk usage (/ partition)
       shell: "df / | awk 'NR==2{print $5}' | sed 's/%//'"
       register: disk_usage_raw
 
     - set_fact:
         disk_usage: "{{ disk_usage_raw.stdout | float | round(2) }}"
 
-    # -----------------------------------------------------------
-    # LOAD AVERAGE
-    # -----------------------------------------------------------
+    # vCPU count
     - name: Get vCPU count
       set_fact:
         vcpu_count: "{{ ansible_processor_vcpus | default(2) }}"
 
-    - name: Get load average (1 min)
+    # Load average
+    - name: Get load average (1 minute)
       shell: "awk '{print $(NF-2)}' /proc/loadavg"
       register: load_avg_raw
 
@@ -59,7 +101,7 @@
         load_pct_of_vcpu: "{{ ((load_avg_raw.stdout | float) * 100 / vcpu_count) | round(2) }}"
 
     # -----------------------------------------------------------
-    # PROCESS CHECKS
+    # Step 3: Process Check
     # -----------------------------------------------------------
     - name: Check required processes
       shell: "pgrep -fl {{ item }}"
@@ -78,27 +120,24 @@
           {% endfor %}
 
     # -----------------------------------------------------------
-    # BUILD HTML ALERT
+    # Step 4: Build HTML Alert File
     # -----------------------------------------------------------
-    - name: Build HTML alert file
+    - name: Create HTML alert file
       copy:
         dest: "{{ alert_file }}"
+        mode: '0644'
         content: |
           <html>
           <body style="font-family: Arial;">
-
           <h2>🚨 System Resource Alert for {{ inventory_hostname }}</h2>
 
           <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
-
             <tr><th>Metric</th><th>Value</th></tr>
-
             <tr><td>CPU Usage</td><td>{{ cpu_usage }}%</td></tr>
             <tr><td>Memory Usage</td><td>{{ mem_usage }}%</td></tr>
             <tr><td>Disk Usage</td><td>{{ disk_usage }}%</td></tr>
             <tr><td>Load Average (1min)</td><td>{{ load_1min }}</td></tr>
             <tr><td>Load % of vCPU</td><td>{{ load_pct_of_vcpu }}%</td></tr>
-
           </table>
 
           <br><br>
@@ -110,21 +149,18 @@
           </table>
 
           <br><br>
-          <p>Alert Threshold: {{ threshold }}%</p>
-
+          <p>Threshold: {{ threshold }}%</p>
           </body>
           </html>
 
     # -----------------------------------------------------------
-    # CONDITIONAL EMAIL ALERT
+    # Step 5: Send Email Alert via Mutt
     # -----------------------------------------------------------
-    - name: Send alert email via mutt
+    - name: Send alert email
       shell: >
-        mutt -e "set content_type=text/html"  
-        -s "🚨 ALERT: High Resource Usage on {{ inventory_hostname }}"  
+        mutt -e "set content_type=text/html" 
+        -s "🚨 ALERT: High Resource Usage on {{ inventory_hostname }}" 
         -- {{ email_to }} < {{ alert_file }}
-      vars:
-        email_to: "suraj.shinde@signzy.com"
       when: >
         (cpu_usage > threshold) or
         (mem_usage > threshold) or
